@@ -183,7 +183,7 @@ def run_dynagan(nifti_file, dynagan_dir,
     ]
 
     # 5) run it _from_ workdir so that "./results" is created there
-    subprocess.run(cmd, cwd=dynagan_dir, check=True)#, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(cmd, cwd=dynagan_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # 6) pick up the single 4D‐CT file Dynagan writes
     out_file = os.path.join(
