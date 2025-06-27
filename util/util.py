@@ -180,7 +180,7 @@ def create_4DCT(real_path, fake_path, output_file, loop=0):
         # EOI then IOE with every two images (no repetition)
         reversed_list = img_list[::-1]
         if len(reversed_list)%2:
-        	start_idx = 1
+            start_idx = 1
         else:
             start_idx = 2
         img_list = img_list[::2] + reversed_list[start_idx::2]

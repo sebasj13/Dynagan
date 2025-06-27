@@ -57,7 +57,7 @@ class TestModel(BaseModel):
         self.loop = opt.loop
         self.transform = SpatialTransformer([128,128,128]).to(self.device)
         self.transform_tum = SpatialTransformer([128,128,128], 'nearest').to(self.device)
-        self.output_dir = './{}/{}/'.format(opt.results_dir, opt.name)
+        self.output_dir = '{}/{}/'.format(opt.results_dir, opt.name)
         
         setattr(self, 'netG' + opt.model_suffix, self.netG)  # store netG in self.
 
@@ -80,7 +80,6 @@ class TestModel(BaseModel):
         """Run forward pass."""
         # Scan number
         case = os.path.basename(self.image_paths[0]).split('_')[1]
-        
         # Create folders for output file
         self.dvf_dir    = os.path.join(self.output_dir, case, 'dvf/')
         self.warped_dir = os.path.join(self.output_dir, case, 'warped/')

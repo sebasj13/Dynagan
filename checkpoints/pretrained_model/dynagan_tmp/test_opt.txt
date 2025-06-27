@@ -1,0 +1,45 @@
+----------------- Options ---------------
+                alpha_max: 1.0                           
+                alpha_min: 0.0                           
+               alpha_step: 11                            	[default: 5]
+             aspect_ratio: 1.0                           
+               batch_size: 1                             
+          checkpoints_dir: C:\Users\sebas\Documents\GitHub\TOPAS_ElektaSynergy\ControlHub\src\dynagan\checkpoints\pretrained_model	[default: ./checkpoints]
+                crop_size: 128                           	[default: 256]
+                 dataroot: C:\Users\sebas\AppData\Local\Temp\dynagan_work_7kspcucf	[default: None]
+             dataset_mode: test                          	[default: dynagan]
+                direction: AtoB                          
+          display_winsize: 256                           
+                    epoch: latest                        
+                     eval: False                         
+                  gpu_ids: -1                            	[default: 0]
+                init_gain: 0.02                          
+                init_type: normal                        
+                 input_nc: 1                             
+                  isTrain: False                         	[default: None]
+                  isTumor: False                         
+                load_iter: 0                             	[default: 0]
+                load_size: 128                           	[default: 256]
+                     loop: 0                             
+         max_dataset_size: inf                           
+                    model: test                          
+             model_suffix:                               
+               n_layers_D: 3                             
+                     name: dynagan_tmp                   	[default: experiment_name]
+                      ndf: 64                            
+                     netD: dvf                           
+                     netG: dvf                           
+                      ngf: 64                            
+               no_dropout: False                         
+                  no_flip: False                         
+                     norm: instance                      
+                 num_test: 1                             	[default: 50]
+              num_threads: 4                             
+                output_nc: 3                             
+                    phase: test                          
+               preprocess: none                          	[default: resize_and_crop]
+              results_dir: C:\Users\sebas\Documents\GitHub\TOPAS_ElektaSynergy\ControlHub\src\dynagan\results	[default: ./results/]
+           serial_batches: False                         
+                   suffix:                               
+                  verbose: False                         
+----------------- End -------------------
