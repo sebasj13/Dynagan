@@ -45,6 +45,7 @@ def find_dicom_series(input_dir):
                         recursive=True):
         try:
             ds = pydicom.dcmread(fn, stop_before_pixels=True)
+            dicom_intercept = float(ds.RescaleIntercept)
         except Exception:
             continue
         if getattr(ds, "Modality", "") == "CT":
@@ -71,7 +72,7 @@ def find_dicom_series(input_dir):
         temp_dcm,
         temp_nifti,
         compression=True,
-        reorient=True     # for v2.6.0
+        reorient=False     # for v2.6.0
     )
 
     # 6) pick the NIfTI with ≥3 slices (just in case)
@@ -88,7 +89,7 @@ def find_dicom_series(input_dir):
         raise RuntimeError("No valid CT NIfTI (≥3 slices) produced")
 
     best_nifti = max(candidates, key=lambda x: x[1])[0]
-    return best_nifti, (temp_nifti, temp_dcm)
+    return best_nifti, (temp_nifti, temp_dcm), dicom_intercept
 
 def resample_to_cube_sitk(in_nifti: str,
                           side: int = 128) -> str:
@@ -201,7 +202,8 @@ def extract_and_dicomify_torch(nifti4d: str,
                                dvf_dir: str,
                                original_ct_nifti: str,
                                input_dicom_dir: str,
-                               output_dir: str):
+                               output_dir: str,
+                               intercept: float = 0.0):
     """
     • Upsample each Dynagan DVF to native grid with ndimage.zoom
     • Warp ORIGINAL CT through that DVF (sharp) using SpatialTransformer
@@ -270,8 +272,8 @@ def extract_and_dicomify_torch(nifti4d: str,
         # --- 4) rotate & offset, then write DICOM slices ---
         # apply your flip/swaps to match ROT, then +1024
         vol = warped[::-1, ::-1, ::-1].transpose((1, 2, 0))  # existing flip+rotate
-        vol = vol[:, ::-1, :]  # flip Y
-        vol += 1024
+        vol = np.rot90(vol, axes=(0,1), k=2) 
+        vol -= intercept
         vol = vol.astype(headers[0].pixel_array.dtype)
 
         phase_dir = os.path.join(output_dir, f"phase_{ph:02d}")
@@ -307,7 +309,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("1) DICOM → NIfTI …")
-    nif, (nif_tmpdir, dcm_tmpdir) = find_dicom_series(args.input_dir)
+    nif, (nif_tmpdir, dcm_tmpdir), intercept = find_dicom_series(args.input_dir)
 
     print("2) Resample to 128³ …")
     nif_rs = resample_to_cube_sitk(nif, side=128)
@@ -328,7 +330,8 @@ def main():
     dvf_dir=os.path.join(args.dynagan_dir, "results", "dynagan_tmp", "0000", "dvf"),
     original_ct_nifti=nif,
     input_dicom_dir=dcm_tmpdir,
-    output_dir=args.output_dir
+    output_dir=args.output_dir,
+    intercept=intercept
 )
 
     print("5) Cleaning up temp folders …")
