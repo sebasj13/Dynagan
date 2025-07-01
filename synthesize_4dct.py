@@ -231,7 +231,7 @@ def extract_and_dicomify_torch(nifti4d: str,
 
     for ph, dvf_file in enumerate(dvf_files):
         print(f"Phase {ph:02d}: warping native CT with DVF …")
-
+        shutil.copy2(dvf_file, os.path.join(phase_dir, os.path.basename(dvf_file)))
         # 3a) load the 128³ DVF and upsample to (D,H,W,3)
         nib_dvf   = nib.load(dvf_file)
         dvf_npy   = nib_dvf.get_fdata()                   # e.g. (128,128,128,3)
