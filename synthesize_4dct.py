@@ -231,7 +231,6 @@ def extract_and_dicomify_torch(nifti4d: str,
 
     for ph, dvf_file in enumerate(dvf_files):
         print(f"Phase {ph:02d}: warping native CT with DVF …")
-        shutil.copy2(dvf_file, os.path.join(phase_dir, os.path.basename(dvf_file)))
         # 3a) load the 128³ DVF and upsample to (D,H,W,3)
         nib_dvf   = nib.load(dvf_file)
         dvf_npy   = nib_dvf.get_fdata()                   # e.g. (128,128,128,3)
@@ -279,7 +278,7 @@ def extract_and_dicomify_torch(nifti4d: str,
         phase_dir = os.path.join(output_dir, f"phase_{ph:02d}")
         os.makedirs(phase_dir, exist_ok=True)
         series_uid = pydicom.uid.generate_uid()
-
+        shutil.copy2(dvf_file, os.path.join(phase_dir, os.path.basename(dvf_file)))
         for z in range(D):
             ds = copy.deepcopy(headers[z])
             ds.PixelData         = vol[:, :, z].tobytes()
