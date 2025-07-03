@@ -27,7 +27,10 @@ import SimpleITK as sitk
 import nibabel as nib
 import numpy as np
 import pydicom
-from util.spatialTransform import SpatialTransformer
+try:
+    from .util.spatialTransform import SpatialTransformer
+except ImportError:
+    from util.spatialTransform import SpatialTransformer
 from scipy import ndimage
 
 def find_dicom_series(input_dir):
@@ -203,7 +206,8 @@ def extract_and_dicomify_torch(nifti4d: str,
                                original_ct_nifti: str,
                                input_dicom_dir: str,
                                output_dir: str,
-                               intercept: float = 0.0):
+                               intercept: float = 0.0,
+                               callback=None):
     """
     • Upsample each Dynagan DVF to native grid with ndimage.zoom
     • Warp ORIGINAL CT through that DVF (sharp) using SpatialTransformer
@@ -229,8 +233,11 @@ def extract_and_dicomify_torch(nifti4d: str,
     # --- 3) we'll init the transformer exactly once ---
     st = None
 
+    os.makedirs(os.path.join(output_dir, "DVFs"), exist_ok=True)
+
     for ph, dvf_file in enumerate(dvf_files):
-        print(f"Phase {ph:02d}: warping native CT with DVF …")
+        if callback is not None:
+            callback((3+ph+1)/(4+len(dvf_files)))
         # 3a) load the 128³ DVF and upsample to (D,H,W,3)
         nib_dvf   = nib.load(dvf_file)
         dvf_npy   = nib_dvf.get_fdata()                   # e.g. (128,128,128,3)
@@ -274,11 +281,13 @@ def extract_and_dicomify_torch(nifti4d: str,
         vol = np.rot90(vol, axes=(0,1), k=2) 
         vol -= intercept
         vol = vol.astype(headers[0].pixel_array.dtype)
+        if callback != None:
+            vol = vol[:, :, ::-1]
 
         phase_dir = os.path.join(output_dir, f"phase_{ph:02d}")
         os.makedirs(phase_dir, exist_ok=True)
         series_uid = pydicom.uid.generate_uid()
-        shutil.copy2(dvf_file, os.path.join(phase_dir, os.path.basename(dvf_file)))
+        shutil.copy2(dvf_file, os.path.join(os.path.join(output_dir, "DVFs"), os.path.basename(dvf_file)))
         for z in range(D):
             ds = copy.deepcopy(headers[z])
             ds.PixelData         = vol[:, :, z].tobytes()
