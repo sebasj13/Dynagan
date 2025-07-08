@@ -239,10 +239,11 @@ def extract_and_dicomify_torch(nifti4d: str,
         if callback is not None:
             callback((3+ph+1)/(4+len(dvf_files)))
         # 3a) load the 128³ DVF and upsample to (D,H,W,3)
-        nib_dvf   = nib.load(dvf_file)
-        dvf_npy   = nib_dvf.get_fdata()                   # e.g. (128,128,128,3)
-        # reorder to (Z, Y, X, 3)
-        dvf_arr   = np.transpose(dvf_npy, (2, 1, 0, 3))    # → (z128,y128,x128,3)
+        dvf_image = sitk.ReadImage(dvf_file)
+        dvf_npy = sitk.GetArrayFromImage(dvf_image).astype(np.float32)
+        dvf_arr = dvf_npy[..., [2, 1, 0]]
+        dvf_arr[..., 2] *= -1
+        dvf_arr = dvf_arr[::-1, ...]
 
         # 3b) upsample to native volume (56,512,512,3)
         zoom_facs = (D/dvf_arr.shape[0],
@@ -281,8 +282,7 @@ def extract_and_dicomify_torch(nifti4d: str,
         vol = np.rot90(vol, axes=(0,1), k=2) 
         vol -= intercept
         vol = vol.astype(headers[0].pixel_array.dtype)
-        if callback != None:
-            vol = vol[:, :, ::-1]
+        vol = vol[:, :, ::-1]
 
         phase_dir = os.path.join(output_dir, f"phase_{ph:02d}")
         os.makedirs(phase_dir, exist_ok=True)
