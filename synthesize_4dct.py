@@ -94,51 +94,31 @@ def find_dicom_series(input_dir):
     best_nifti = max(candidates, key=lambda x: x[1])[0]
     return best_nifti, (temp_nifti, temp_dcm), dicom_intercept
 
-def resample_to_cube_sitk(in_nifti: str,
-                          side: int = 128) -> str:
-    """
-    SimpleITK down-resample to EXACT `out_side³` while preserving
-    origin / spacing / direction.  Matches the notebook’s
-    `resample_image()` quality.
-
-    Returns the new .nii.gz path.
-    """
+def resample_to_cube_sitk(in_nifti: str, side: int = 128) -> str:
     img = sitk.ReadImage(in_nifti)
 
-    # new isotropic size & spacing
-    ref_size     = [side, side, side]
-    phys_sz      = [(sz - 1) * sp for sz, sp in zip(img.GetSize(), img.GetSpacing())]
-    new_spacing  = [p / (s - 1) for p, s in zip(phys_sz, ref_size)]
+    # target size and spacing that preserves physical extent
+    ref_size = [side, side, side]
+    phys_sz  = [(sz - 1) * sp for sz, sp in zip(img.GetSize(), img.GetSpacing())]
+    new_spacing = [p / (s - 1) for p, s in zip(phys_sz, ref_size)]
 
-    ref_origin    = img.GetOrigin()
-    ref_direction = np.identity(3).flatten()
-
+    # build reference image that *copies* original orientation & origin
     ref_img = sitk.Image(ref_size, img.GetPixelIDValue())
-    ref_img.SetOrigin(ref_origin)
+    ref_img.SetOrigin(img.GetOrigin())
     ref_img.SetSpacing(new_spacing)
-    ref_img.SetDirection(ref_direction)
+    ref_img.SetDirection(img.GetDirection())  # <- keep orientation!
 
-    # center the original inside the reference field-of-view
-    transform = sitk.AffineTransform(3)
-    transform.SetMatrix(img.GetDirection())
-    img_center = np.array(img.TransformContinuousIndexToPhysicalPoint(
-        np.array(img.GetSize()) / 2.0))
-    ref_center = np.array(ref_img.TransformContinuousIndexToPhysicalPoint(
-        np.array(ref_img.GetSize()) / 2.0))
-
-    centering = sitk.TranslationTransform(3)
-    centering.SetOffset(transform.GetInverse().TransformPoint(img_center) - ref_center)
-    xform = sitk.CompositeTransform([transform, centering])
+    # identity transform (no extra rotations/translations)
+    xform = sitk.Transform(3, sitk.sitkIdentity)
 
     resampled = sitk.Resample(
         img,
         ref_img,
         xform,
         sitk.sitkLinear,
-        -1000.0  # default HU outside FOV
+        -1000.0
     )
 
-    # cast back to int16 (CT)
     resampled = sitk.Cast(resampled, sitk.sitkInt16)
 
     out_path = in_nifti.replace(".nii", f"_{side}.nii")
@@ -189,112 +169,159 @@ def run_dynagan(nifti_file, dynagan_dir,
     # 5) run it _from_ workdir so that "./results" is created there
     subprocess.run(cmd, cwd=dynagan_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 6) pick up the single 4D‐CT file Dynagan writes
-    out_file = os.path.join(
-        dynagan_dir,
-        "results",
-        "dynagan_tmp",
-        "LungCT_0000_4DCT.nii.gz"
-    )
-    if not os.path.exists(out_file):
-        raise RuntimeError(f"Dynagan did not produce the 4DCT at {out_file}")
-    return out_file, workdir
+    return workdir
 
 
-def extract_and_dicomify_torch(nifti4d: str,
-                               dvf_dir: str,
-                               original_ct_nifti: str,
-                               input_dicom_dir: str,
-                               output_dir: str,
-                               intercept: float = 0.0,
-                               callback=None):
+# ---- helper: nibabel-style DVF upsample to target shape (D,H,W) ----
+def _load_and_resize_dvf_nib(dvf_path: str, target_shape_zyx: tuple[int, int, int]) -> np.ndarray:
     """
-    • Upsample each Dynagan DVF to native grid with ndimage.zoom
-    • Warp ORIGINAL CT through that DVF (sharp) using SpatialTransformer
-    • Mutate voxels (+1024 & rotation) and write back as DICOM slices
+    Read DVF NIfTI (expected (X,Y,Z,3)), return numpy as (D,H,W,3) with target_shape_zyx via ndimage.zoom.
+    Uses order=1 (linear) and does NOT scale displacement magnitudes.
+    """
+    nii = nib.load(dvf_path)
+    data = nii.get_fdata(dtype=np.float32)  # (X,Y,Z,3)
+    if data.ndim != 4 or data.shape[-1] != 3:
+        raise ValueError(f"DVF must have shape (X,Y,Z,3); got {data.shape}")
+
+    # Reorder to (Z,Y,X,3) to match SimpleITK array orientation (orig_arr is (Z,Y,X))
+    dvf_zyx3 = np.transpose(data, (2, 1, 0, 3)).astype(np.float32)  # (Z,Y,X,3)
+
+    Dz, Hy, Wx = target_shape_zyx
+    z0, y0, x0, _ = dvf_zyx3.shape
+
+    # Zoom factors per axis to hit the CT voxel grid size
+    zf = Dz / z0
+    yf = Hy / y0
+    xf = Wx / x0
+
+    # Linear interpolation, no smoothing
+    dvf_up = ndimage.zoom(dvf_zyx3, zoom=(zf, yf, xf, 1), order=1)
+    dvf_up = dvf_up.astype(np.float32, copy=False)  # (D,H,W,3)
+    return dvf_up
+
+# ---- optional: write vector DVF as NIfTI using CT geometry (affine/header) ----
+def _save_dvf_as_nifti_with_ct_geom(dvf_zyx3: np.ndarray, ct_ref_path: str, out_path: str):
+    """
+    Save DVF (Z,Y,X,3) as NIfTI using CT’s affine+header so spacing/origin/direction are correct.
+    NIfTI data will be stored as (X,Y,Z,3).
+    """
+    if dvf_zyx3.ndim != 4 or dvf_zyx3.shape[-1] != 3:
+        raise ValueError(f"Expected (Z,Y,X,3), got {dvf_zyx3.shape}")
+
+    # Back to nibabel orientation (X,Y,Z,3)
+    dvf_xyzc = np.transpose(dvf_zyx3, (2, 1, 0, 3))
+
+    ref = nib.load(ct_ref_path)
+    hdr = ref.header.copy()
+    aff = ref.affine.copy()
+
+    # Ensure float32
+    dvf_xyzc = dvf_xyzc.astype(np.float32, copy=False)
+    nib.save(nib.Nifti1Image(dvf_xyzc, aff, hdr), out_path)
+
+
+def extract_and_dicomify_torch(
+    dvf_dir: str,
+    original_ct_nifti: str,
+    input_dicom_dir: str,
+    output_dir: str,
+    intercept: float = 0.0,
+    callback=None
+):
+    """
+    • Upsample each Dynagan DVF to native CT grid with nibabel + ndimage.zoom (like the README flow)
+    • Warp ORIGINAL CT via SpatialTransformer using that upsampled DVF
+    • Write out: resampled DVFs (NIfTI) + warped phases (NIfTI)
     """
     # --- 0) load original CT array (Z, Y, X) ---
     orig_img = sitk.ReadImage(original_ct_nifti)
     orig_arr = sitk.GetArrayFromImage(orig_img).astype(np.float32)
-    D, H, W  = orig_arr.shape  # depth, height, width
+    D, H, W = orig_arr.shape  # depth, height, width (SimpleITK order)
 
-    # --- 1) find all DVF .nii.gz files ---
-    dvf_files = sorted(glob.glob(os.path.join(dvf_dir, "*dvf*.nii.gz")))
+    # --- 1) DVFs to process ---
+    dvf_files = sorted(glob.glob(os.path.join(dvf_dir, "*dvf*.nii*")))
     if not dvf_files:
         raise RuntimeError(f"No DVF files found in {dvf_dir!r}")
 
-    # --- 2) prepare DICOM headers (sorted by InstanceNumber) once ---
+    # --- 2) prepare DICOM headers (sorted by InstanceNumber) once (kept as in your code) ---
     dicom_fns = sorted(
         glob.glob(os.path.join(input_dicom_dir, "*.dcm")),
         key=lambda fn: int(pydicom.dcmread(fn, stop_before_pixels=True).InstanceNumber)
     )
-    headers = [pydicom.dcmread(fn) for fn in dicom_fns]
+    headers = [pydicom.dcmread(fn) for fn in dicom_fns]  # not used here, kept for parity
 
-    # --- 3) we'll init the transformer exactly once ---
+    # --- 3) spatial transformer (initialized once on native grid) ---
     st = None
-
     os.makedirs(os.path.join(output_dir, "DVFs"), exist_ok=True)
 
     for ph, dvf_file in enumerate(dvf_files):
         if callback is not None:
-            callback((3+ph+1)/(4+len(dvf_files)))
-        # 3a) load the 128³ DVF and upsample to (D,H,W,3)
-        dvf_image = sitk.ReadImage(dvf_file)
-        dvf_npy = sitk.GetArrayFromImage(dvf_image).astype(np.float32)
-        dvf_arr = dvf_npy[..., [2, 1, 0]]
-        dvf_arr[..., 2] *= -1
-        dvf_arr = dvf_arr[::-1, ...]
+            # progress: 3 setup steps + phases; keep your original style
+            callback((3 + ph + 1) / (4 + len(dvf_files)))
 
-        # 3b) upsample to native volume (56,512,512,3)
-        zoom_facs = (D/dvf_arr.shape[0],
-                     H/dvf_arr.shape[1],
-                     W/dvf_arr.shape[2],
-                     1)
-        dvf_arr_up = ndimage.zoom(dvf_arr, zoom=zoom_facs, order=1)
+        # --- A) Upsample DVF to native CT size using nibabel + ndimage.zoom ---
+        dvf_arr_up = _load_and_resize_dvf_nib(dvf_file, (D, H, W))  # (D,H,W,3)
+       
+        # If your DVF was in voxels of the 128³ grid (not mm), preserve physical motion by scaling:
+        zf, yf, xf = D/128.0, H/128.0, W/128.0
+        dvf_arr_up[..., 0] *= xf
+        dvf_arr_up[..., 1] *= yf
+        dvf_arr_up[..., 2] *= zf
 
-        # 3b) make the flow tensor shape (1, 3, D, H, W)
+        # --- B) Save DVF (native grid) as NIfTI with CT geometry (optional but useful) ---
+        # also keep original for traceability
+        shutil.copy2(dvf_file, os.path.join(output_dir, "DVFs", os.path.basename(dvf_file)))
+        dvf_native_path = os.path.join(output_dir, "DVFs", f"dvf_phase_{ph:02d}_native.nii.gz")
+        #_save_dvf_as_nifti_with_ct_geom(dvf_arr_up, original_ct_nifti, dvf_native_path)
+
+        # --- C) Torch tensors for warping (same as your workflow) ---
         dvf_t = (
-            torch.from_numpy(dvf_arr_up)
-                 .permute(3, 0, 1, 2)   # -> (3, D, H, W)
-                 .unsqueeze(0)          # -> (1, 3, D, H, W)
+            torch.from_numpy(dvf_arr_up[..., [2, 1, 0]])  # (D,H,W,3)
+                 .permute(3, 0, 1, 2)     # -> (3, D, H, W)
+                 .unsqueeze(0)            # -> (1, 3, D, H, W)
                  .float()
         )
-        mov_t = torch.from_numpy(orig_arr)         \
-                     .unsqueeze(0).unsqueeze(1)    \
-                     .float()                      # -> (1, 1, D, H, W)
 
-        # 3c) init transformer on the DVF’s grid once
+        mov_t = (
+            torch.from_numpy(orig_arr)    # (D,H,W)
+                 .unsqueeze(0).unsqueeze(1)  # -> (1, 1, D, H, W)
+                 .float()
+        )
+
+        # init transformer on native CT grid once
         if st is None:
-            st = SpatialTransformer(dvf_arr_up.shape[:3])  # pass (D, H, W)
+            st = SpatialTransformer(np.asarray([D, H, W]))
             if torch.cuda.is_available():
                 st = st.cuda()
 
-        # 3d) move to GPU if available
+        # move to GPU if available
         if torch.cuda.is_available():
-            dvf_t, mov_t, st_dev = dvf_t.cuda(), mov_t.cuda(), "gpu"
-        else:
-            st_dev = "cpu"
-        warped = st(mov_t, dvf_t).cpu().numpy()[0, 0]  # D,H,W float32
+            dvf_t = dvf_t.cuda()
+            mov_t = mov_t.cuda()
 
-        # --- 4) rotate & offset, then write DICOM slices ---
-        # apply your flip/swaps to match ROT, then +1024
+        warped = st(mov_t, dvf_t).cpu().numpy()[0, 0]  # (D,H,W), float32
+
+        # optional intercept shift (mirrors your function signature)
+        if intercept != 0.0:
+            warped = warped + float(intercept)
+
         vol = warped[::-1, ::-1, ::-1].transpose((1, 2, 0))  # existing flip+rotate
         vol = np.rot90(vol, axes=(0,1), k=2) 
-        vol -= intercept
         vol = vol.astype(headers[0].pixel_array.dtype)
-        vol = vol[:, :, ::-1]
+        #vol = vol[:, :, ::-1]
 
         phase_dir = os.path.join(output_dir, f"phase_{ph:02d}")
         os.makedirs(phase_dir, exist_ok=True)
         series_uid = pydicom.uid.generate_uid()
         shutil.copy2(dvf_file, os.path.join(os.path.join(output_dir, "DVFs"), os.path.basename(dvf_file)))
-        for z in range(D):
+        for z in range(len(headers)):
             ds = copy.deepcopy(headers[z])
             ds.PixelData         = vol[:, :, z].tobytes()
             ds.SeriesInstanceUID = series_uid
             ds.SOPInstanceUID    = pydicom.uid.generate_uid()
             ds.InstanceNumber    = z + 1
             ds.SeriesDescription = f"4DCT_phase_{ph:02d}"
+            ds.RescaleIntercept  = 0.0
             ds.save_as(os.path.join(phase_dir, f"{z+1:03d}.dcm"))
 
 def main():
@@ -323,7 +350,7 @@ def main():
     nif_rs = resample_to_cube_sitk(nif, side=128)
 
     print("3) Running Dynagan inference …")
-    out4d, workdir = run_dynagan(
+    workdir = run_dynagan(
     nif_rs,                # ← your 128³ NIfTI path
     args.dynagan_dir,
     args.alpha_min,
@@ -334,12 +361,11 @@ def main():
 
     print("4) Extracting phases & writing DICOM …")
     extract_and_dicomify_torch(
-    nifti4d=out4d,
     dvf_dir=os.path.join(args.dynagan_dir, "results", "dynagan_tmp", "0000", "dvf"),
     original_ct_nifti=nif,
     input_dicom_dir=dcm_tmpdir,
     output_dir=args.output_dir,
-    intercept=intercept
+    intercept=0
 )
 
     print("5) Cleaning up temp folders …")
