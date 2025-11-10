@@ -308,7 +308,7 @@ def extract_and_dicomify_torch(
         vol = warped[::-1, ::-1, ::-1].transpose((1, 2, 0))  # existing flip+rotate
         vol = np.rot90(vol, axes=(0,1), k=2) 
         vol = vol.astype(headers[0].pixel_array.dtype)
-        #vol = vol[:, :, ::-1]
+        vol = vol[:, :, ::-1]
 
         phase_dir = os.path.join(output_dir, f"phase_{ph:02d}")
         os.makedirs(phase_dir, exist_ok=True)
